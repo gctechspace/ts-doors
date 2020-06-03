@@ -157,7 +157,9 @@ void onDoorStateChange() {
 void setup() {
   // Initialize Serial, SPI and RFID
   Serial.begin(115200);
-  SPI.begin();
+  delay(2000);
+  Serial.println("Morning");
+  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CSS_PIN);
   rfid.PCD_Init();
 
   // Initialze the pins
@@ -204,6 +206,7 @@ void loop() {
 
     // Send status via mqtt
     mqttClient.publish(MQTT_STATE_TOPIC, 1, false, status);
+    Serial.println(status);
 
     // Mark the changed state as false
     doorChangedState = false;
@@ -232,6 +235,7 @@ void loop() {
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
     return;
   }
+  Serial.println("Card found");
 
   // Make sure card is a mifare card
   MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
@@ -250,6 +254,7 @@ void loop() {
 
   // Send rfid via mqtt
   mqttClient.publish(MQTT_RFID_TOPIC, 1, false, rfidStr);
+  Serial.println(rfidStr);
 
   // Halt picc
   rfid.PICC_HaltA();

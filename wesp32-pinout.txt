@@ -1,12 +1,15 @@
 MFRC522 to WESP32 Pinout
 1 VCC       -> 2
-2 RST       -> 3   (IO23)
+2 RST       -> 15   (IO4)   15-4
 3 GND       -> 1
 4 INT
-5 MISO      -> 16  (IO12)
-6 MOSI      -> 13  (IO13)
-7 SCK       -> 14  (IO14)
-8 SDA       -> 17  (IO15)
+5 MISO      -> 7  (IO32)    7-32    
+6 MOSI      -> 3  (IO23)    3-23     
+7 SCK       -> 11  (IO18)   11-18    
+8 SDA(CSS)  -> 12  (IO13)   12-13
+
+
+
 
 Door Latch  -> 4   (IO36)
 Hall Effect -> 5   (IO39)
