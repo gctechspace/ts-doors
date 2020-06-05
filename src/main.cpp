@@ -7,14 +7,17 @@
 
 #include "config.h"
 #include "utils.h"
+#include "debug.h"
 
-#define MQTT_RFID_TOPIC "doors/" DEVICE_ID "/rfid"
-#define MQTT_LOCK_TOPIC "doors/" DEVICE_ID "/lock"
-#define MQTT_STATE_TOPIC "doors/" DEVICE_ID "/state"
+#define DEBUG 1
 
-TimerHandle_t ethReconnectTimer;
+#define MQTT_RFID_TOPIC DEVICE_TYPE "/" DEVICE_ID "/rfid"
+#define MQTT_LOCK_TOPIC DEVICE_TYPE "/" DEVICE_ID "/lock"
+#define MQTT_STATE_TOPIC DEVICE_TYPE "/" DEVICE_ID "/state"
+#define MQTT_LOG_TOPIC DEVICE_TYPE "/" DEVICE_ID "/log"
+#define MQTT_RESTART_TOPIC DEVICE_TYPE "/" DEVICE_ID "/restart"
+
 AsyncMqttClient mqttClient;
-TimerHandle_t mqttReconnectTimer;
 MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
 
 enum DoorState { DOOR_CLOSED = 0, DOOR_WAITING, DOOR_OPENED, MAX_DOOR_STATES };
@@ -34,83 +37,106 @@ enum LockResponse {
 };
 
 uint32_t lockTopicHash;
+uint32_t restartTopicHash;
 uint32_t lockResponseHashes[MAX_LOCK_RESPONSES];
 
 bool ethernetConnected = false;
 
-void connectToEthernet() {
-  Serial.println("Connecting to Ethernet...");
 
-  ETH.begin();
+void connectToMqtt()
+{
+  //DebugPrintln("Connecting to MQTT...");
+    mqttClient.connect();
 }
 
-void connectToMqtt() {
-  Serial.println("Connecting to MQTT...");
-
-  mqttClient.connect();
-}
-
-void WiFiEvent(WiFiEvent_t event) {
-  switch (event) {
-  case SYSTEM_EVENT_ETH_START:
-    Serial.println("Ethernet Started");
-
-    ETH.setHostname(DEVICE_ID);
-
-    break;
-
-  case SYSTEM_EVENT_ETH_CONNECTED:
-    Serial.println("Ethernet Connected");
-
-    break;
-
-  case SYSTEM_EVENT_ETH_GOT_IP:
-    Serial.print("ETH MAC: ");
-    Serial.print(ETH.macAddress());
-    Serial.print(", IPv4: ");
-    Serial.print(ETH.localIP());
-    if (ETH.fullDuplex()) {
-      Serial.print(", FULL_DUPLEX");
+/**********************************************************************
+* Wifi&Ethernet connection events
+**********************************************************************/
+void WiFiEvent(WiFiEvent_t event)
+{
+    switch (event) {
+        case SYSTEM_EVENT_ETH_START:
+            DebugPrintln("ETH Started");
+            ETH.setHostname(DEVICE_ID);              //set eth hostname here
+            break;
+        case SYSTEM_EVENT_ETH_CONNECTED:
+            DebugPrintln("ETH Connected");
+            break;
+        case SYSTEM_EVENT_ETH_GOT_IP:
+            DebugPrint("ETH MAC: ");
+            DebugPrint(ETH.macAddress());
+            DebugPrint(", IPv4: ");
+            DebugPrint(ETH.localIP());
+            if (ETH.fullDuplex()) {
+                DebugPrint(", FULL_DUPLEX");
+            }
+            DebugPrint(", ");
+            DebugPrint(ETH.linkSpeed());
+            DebugPrintln("Mbps");
+            /***************************************************************************
+                We have an IP Connect MQTT
+            ***************************************************************************/
+            connectToMqtt();      
+            break;
+        case SYSTEM_EVENT_ETH_DISCONNECTED:
+            DebugPrintln("ETH Disconnected");
+            break;
+        case SYSTEM_EVENT_ETH_STOP:
+            DebugPrintln("ETH Stopped");
+            break;
+        default:
+            break;
     }
-    Serial.print(", ");
-    Serial.print(ETH.linkSpeed());
-    Serial.println("Mbps");
-
-    ethernetConnected = true;
-
-    connectToMqtt();
-
-    break;
-
-  case SYSTEM_EVENT_ETH_DISCONNECTED:
-  case SYSTEM_EVENT_ETH_STOP:
-    Serial.println("Ethernet lost connection");
-
-    ethernetConnected = false;
-
-    xTimerStop(mqttReconnectTimer, 0);
-    xTimerStart(ethReconnectTimer, 0);
-
-    break;
-  }
 }
 
-void onMqttConnect(bool sessionPresent) {
-  Serial.println("Connected to MQTT.");
+static int8_t lastDisconnectReason = int(AsyncMqttClientDisconnectReason::TCP_DISCONNECTED);
 
-  // Subscribe to the lock response messages
-  mqttClient.subscribe(MQTT_LOCK_TOPIC, 1);
+void onMqttConnect(bool sessionPresent)
+{
+    mqttClient.publish(MQTT_LOG_TOPIC, 0, 1, "{ \"available\": 1 }"); // Retain the state topic
+
+    mqttClient.subscribe(MQTT_RESTART_TOPIC, 0);
+    mqttClient.subscribe(MQTT_LOCK_TOPIC, 1);
+
+    DebugPrintln("[INFO]: mqtt, Connected as " DEVICE_ID);
+    DebugPrintln("[INFO]: mqtt, Subscribed: " MQTT_RESTART_TOPIC);
+    DebugPrintln("[INFO]: mqtt, Subscribed: " MQTT_LOCK_TOPIC);
 }
 
-void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  Serial.println("MQTT disconnected.");
-
-  // Mqtt was disconnected and ethernet is connected, try to reconnect to mqtt
-  if (ethernetConnected) {
-    xTimerStart(ethReconnectTimer, 0);
-  }
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
+{
+    if (lastDisconnectReason != int(reason)){
+        switch (reason) {
+            case AsyncMqttClientDisconnectReason::TCP_DISCONNECTED:
+                DebugPrintln("[WARN]: mqtt, TCP disconnect");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_UNACCEPTABLE_PROTOCOL_VERSION:
+                 DebugPrintln("[WARN]: mqtt, Bad Protocol");
+                 break;
+            case AsyncMqttClientDisconnectReason::MQTT_IDENTIFIER_REJECTED:
+                DebugPrintln("[WARN]: mqtt, Bad Client ID");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_SERVER_UNAVAILABLE:
+                DebugPrintln("[WARN]: mqtt, unavailable");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_MALFORMED_CREDENTIALS:
+                DebugPrintln("[WARN]: mqtt, Bad Credentials");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_NOT_AUTHORIZED:
+                DebugPrintln("[WARN]: mqtt, Unauthorized");
+                break;
+            case AsyncMqttClientDisconnectReason::TLS_BAD_FINGERPRINT:
+                DebugPrintln("[ERR]: mqtt, Bad Fingerprint");
+                break;
+        }
+        lastDisconnectReason = int(reason);
+    }
 }
 
+
+/**********************************************************************
+* Callback for any MQTT message recieved
+**********************************************************************/
 void onMqttMessage(char *topic, char *payload,
                    AsyncMqttClientMessageProperties properties, size_t len,
                    size_t index, size_t total) {
@@ -124,21 +150,27 @@ void onMqttMessage(char *topic, char *payload,
 
     // Check payload hash against known response hashes
     if (payloadHash == lockResponseHashes[LOCK_RESPONSE_NEWCARD]) {
-      Serial.println("NEWCARD");
+      DebugPrintln("NEWCARD");
     } else if (payloadHash == lockResponseHashes[LOCK_RESPONSE_NOACCESS]) {
-      Serial.println("NOACCESS");
+      DebugPrintln("NOACCESS");
     } else if (payloadHash == lockResponseHashes[LOCK_RESPONSE_UNPAID]) {
-      Serial.println("UNPAID");
+      DebugPrintln("UNPAID");
     } else if (payloadHash == lockResponseHashes[LOCK_RESPONSE_GRANTED]) {
-      Serial.println("GRANTED");
+      DebugPrintln("GRANTED");
 
       // Set the door state to waiting to open
       doorState = DOOR_WAITING;
     } else {
-      Serial.println("Unknown payload");
+      DebugPrintln("Unknown payload");
     }
+  } else if(topicHash == restartTopicHash){
+      mqttClient.publish(MQTT_LOG_TOPIC, 0, 0, "{ \"Restart\": \"onMqttMessage\" }");
+      mqttClient.disconnect();
+      delay(1000);
+      ESP.restart();
+      delay(10000);
   } else {
-    Serial.println("Unknown topic");
+    DebugPrintln("Unknown topic");
   }
 }
 
@@ -154,111 +186,112 @@ void onDoorStateChange() {
   }
 }
 
-void setup() {
-  // Initialize Serial, SPI and RFID
-  Serial.begin(115200);
-  delay(2000);
-  Serial.println("Morning");
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CSS_PIN);
-  rfid.PCD_Init();
 
-  // Initialze the pins
-  pinMode(DOOR_STRIKE_PIN, OUTPUT);
-  pinMode(DOOR_HALL_EFFECT_PIN, INPUT_PULLUP);
+void setup()
+{
 
-  // Attach the interrupt
-  attachInterrupt(digitalPinToInterrupt(DOOR_HALL_EFFECT_PIN),
-                  onDoorStateChange, CHANGE);
+    DebugBegin(115200);
 
-  // Initialize crcs
-  lockTopicHash = crc32String(MQTT_LOCK_TOPIC);
-  lockResponseHashes[LOCK_RESPONSE_NEWCARD] = crc32String("NEWCARD");
-  lockResponseHashes[LOCK_RESPONSE_NOACCESS] = crc32String("NOACCESS");
-  lockResponseHashes[LOCK_RESPONSE_UNPAID] = crc32String("UNPAID");
-  lockResponseHashes[LOCK_RESPONSE_GRANTED] = crc32String("GRANTED");
+    SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CSS_PIN);
+    rfid.PCD_Init();
 
-  // Setup timers for mqtt and ethernet reconnection
-  mqttReconnectTimer =
-      xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void *)0,
-                   reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
-  ethReconnectTimer = xTimerCreate(
-      "ethTimer", pdMS_TO_TICKS(2000), pdFALSE, (void *)0,
-      reinterpret_cast<TimerCallbackFunction_t>(connectToEthernet));
+    // Initialze the pins
+    pinMode(DOOR_STRIKE_PIN, OUTPUT);
+    pinMode(DOOR_HALL_EFFECT_PIN, INPUT_PULLUP);
 
-  // Bind to the wifi events
-  WiFi.onEvent(WiFiEvent);
+    // Attach the interrupt
+    attachInterrupt(digitalPinToInterrupt(DOOR_HALL_EFFECT_PIN), onDoorStateChange, CHANGE);
 
-  // Initialize the mqtt client
-  mqttClient.onConnect(onMqttConnect);
-  mqttClient.onDisconnect(onMqttDisconnect);
-  mqttClient.onMessage(onMqttMessage);
-  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+    // Initialize crcs
+    lockTopicHash = crc32String(MQTT_LOCK_TOPIC);
+    restartTopicHash = crc32String(MQTT_RESTART_TOPIC);
+    lockResponseHashes[LOCK_RESPONSE_NEWCARD] = crc32String("NEWCARD");
+    lockResponseHashes[LOCK_RESPONSE_NOACCESS] = crc32String("NOACCESS");
+    lockResponseHashes[LOCK_RESPONSE_UNPAID] = crc32String("UNPAID");
+    lockResponseHashes[LOCK_RESPONSE_GRANTED] = crc32String("GRANTED");
 
-  // Connect to the ethernet
-  connectToEthernet();
+    // Bind to the wifi events
+    WiFi.onEvent(WiFiEvent);
+
+    // Initialize the mqtt client
+    mqttClient.onConnect(onMqttConnect);
+    mqttClient.onDisconnect(onMqttDisconnect);
+    mqttClient.onMessage(onMqttMessage);
+    mqttClient.setClientId(DEVICE_ID);
+    // mqttClient.setCredentials(MQTT_USER, MQTT_PASS);
+    mqttClient.setWill(MQTT_LOG_TOPIC, 0, 1, "{ \"available\": 0 }"); //const char* topic, uint8_t qos, bool retain, const char* payload = nullptr, size_t length = 0
+    mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+
+    // Connect to the ethernet
+    ETH.begin();
 }
 
-void loop() {
-  // Has the door state changed?
-  if (doorChangedState) {
-    // Set the status to open or closed
-    const char *status = digitalRead(DOOR_HALL_EFFECT_PIN) ? "open" : "closed";
 
-    // Send status via mqtt
-    mqttClient.publish(MQTT_STATE_TOPIC, 1, false, status);
-    Serial.println(status);
-
-    // Mark the changed state as false
-    doorChangedState = false;
-  }
-
-  // Check the door state
-  if (doorState == DOOR_WAITING) {
-    // Switch the latch to high
-    digitalWrite(DOOR_STRIKE_PIN, HIGH);
-
-    // Open the door
-    doorState = DOOR_OPENED;
-    doorOpenTime = millis();
-  } else if (doorState == DOOR_OPENED) {
-    // Has the strike timeout elapsed?
-    if (millis() - doorOpenTime > DOOR_STRIKE_TIMEOUT) {
-      // Switch the latch to low
-      digitalWrite(DOOR_STRIKE_PIN, LOW);
-
-      // Close the door
-      doorState = DOOR_CLOSED;
+void loop()
+{
+    if(!mqttClient.connected()){
+        connectToMqtt();
     }
-  }
+      // Has the door state changed?
+    if (doorChangedState) {
+    // Set the status to open or closed
+        const char *status = digitalRead(DOOR_HALL_EFFECT_PIN) ? "open" : "closed";
 
-  // Wait for new card scan and read it
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
-    return;
-  }
-  Serial.println("Card found");
+        // Send status via mqtt
+        mqttClient.publish(MQTT_STATE_TOPIC, 1, false, status);
+        DebugPrintln(status);
 
-  // Make sure card is a mifare card
-  MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
+        // Mark the changed state as false
+        doorChangedState = false;
+    }
 
-  if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&
-      piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
-      piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
-    Serial.println(F("Your tag is not of type MIFARE Classic."));
+    // Check the door state
+    if (doorState == DOOR_WAITING) {
+        // Switch the latch to high
+        digitalWrite(DOOR_STRIKE_PIN, HIGH);
 
-    return;
-  }
+        // Open the door
+        doorState = DOOR_OPENED;
+        doorOpenTime = millis();
+    } else if (doorState == DOOR_OPENED) {
+        // Has the strike timeout elapsed?
+        if (millis() - doorOpenTime > DOOR_STRIKE_TIMEOUT) {
+            // Switch the latch to low
+            digitalWrite(DOOR_STRIKE_PIN, LOW);
 
-  // Convert binary rfid to hex string
-  char rfidStr[64] = {0};
-  hexToAscii(rfid.uid.uidByte, rfidStr, rfid.uid.size);
+            // Close the door
+            doorState = DOOR_CLOSED;
+        }
+    }
 
-  // Send rfid via mqtt
-  mqttClient.publish(MQTT_RFID_TOPIC, 1, false, rfidStr);
-  Serial.println(rfidStr);
+    // Wait for new card scan and read it
+    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+        return;
+    }
+    DebugPrintln("Card found");
 
-  // Halt picc
-  rfid.PICC_HaltA();
+    // Make sure card is a mifare card
+    MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
 
-  // Stop encryption on pcd
-  rfid.PCD_StopCrypto1();
+    if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&
+        piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
+        piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
+        DebugPrintln(F("Your tag is not of type MIFARE Classic."));
+
+        return;
+    }
+
+    // Convert binary rfid to hex string
+    char rfidStr[64] = {0};
+    hexToAscii(rfid.uid.uidByte, rfidStr, rfid.uid.size);
+
+    // Send rfid via mqtt
+    mqttClient.publish(MQTT_RFID_TOPIC, 1, false, rfidStr);
+    DebugPrintln(rfidStr);
+
+    // Halt picc
+    rfid.PICC_HaltA();
+
+    // Stop encryption on pcd
+    rfid.PCD_StopCrypto1();
 }

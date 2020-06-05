@@ -6,7 +6,7 @@ MFRC522 to WESP32 Pinout
 5 MISO      -> 7  (IO32)    7-32    
 6 MOSI      -> 3  (IO23)    3-23     
 7 SCK       -> 11  (IO18)   11-18    
-8 SDA(CSS)  -> 12  (IO13)   12-13
+8 SDA(CSS)  -> 13  (IO13)   12-13
 
 
 
