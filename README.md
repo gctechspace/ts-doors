@@ -5,7 +5,7 @@ TechSpace Doors client for WESP32 built with PlatformIO.
 
 ### Dependencies
 
-* AsyncMqttClient 
+* PubSubClient
 * MFRC522
 * ErriezCRC32
 * WiFiClient
